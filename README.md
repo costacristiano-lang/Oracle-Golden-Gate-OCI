@@ -1,17 +1,25 @@
 # OCI GoldenGate: Oracle Database para Oracle Database
 
-Guia de referência para configurar **replicação contínua Oracle → Oracle** com o OCI GoldenGate Data Replication. Ele cobre a preparação dos bancos, IAM, rede, Vault, conexões, carga inicial e validação.
+Passo a passo para configurar **replicação contínua Oracle → Oracle** com o OCI GoldenGate Data Replication, da preparação dos bancos à validação dos dados.
+
+> **Origem:** adaptação para GitHub do artigo [OCI GoldenGate: Oracle Database para Oracle Database](https://medium.com/@costa.cristiano/oci-goldengate-oracle-database-para-oracle-database-249184cd4ed1), de Cristiano Costa. Substitua os valores entre `<...>` pelos dados do seu ambiente e valide os comandos antes de executá-los em produção.
 
 ## Sumário
 
 - [Arquitetura e sequência](#arquitetura-e-sequência)
-- [Pré-requisitos](#pré-requisitos)
-- [1. Configurar IAM, rede e Vault](#1-configurar-iam-rede-e-vault)
-- [2. Preparar os bancos Oracle](#2-preparar-os-bancos-oracle)
-- [3. Criar o Deployment e as connections](#3-criar-o-deployment-e-as-connections)
-- [4. Configurar Extract e Replicat](#4-configurar-extract-e-replicat)
-- [5. Coordenar a carga inicial com SCN](#5-coordenar-a-carga-inicial-com-scn)
-- [6. Validar e monitorar](#6-validar-e-monitorar)
+- [1. Pré-requisitos](#1-pré-requisitos)
+- [2. IAM](#2-iam)
+- [3. Rede](#3-rede)
+- [4. OCI Vault e secrets](#4-oci-vault-e-secrets)
+- [5. Preparar o Oracle Database origem](#5-preparar-o-oracle-database-origem)
+- [6. Preparar o Oracle Database destino](#6-preparar-o-oracle-database-destino)
+- [7. Criar o Deployment](#7-criar-o-deployment)
+- [8. Criar connections](#8-criar-connections)
+- [9. Atribuir e testar connections](#9-atribuir-e-testar-connections)
+- [10. Configurar a replicação](#10-configurar-a-replicação)
+- [11. Carga inicial](#11-carga-inicial)
+- [12. Operação e validação](#12-operação-e-validação)
+- [Solução de problemas](#solução-de-problemas)
 - [Referências](#referências)
 
 ## Arquitetura e sequência
@@ -28,7 +36,9 @@ flowchart LR
 
 O **Extract deve capturar as mudanças enquanto a linha de base é carregada**. Após a importação, o Replicat aplica as mudanças acumuladas e passa a acompanhar a origem. Um Deployment pode atender aos dois bancos em um cenário simples; avalie Deployments separados conforme volume, isolamento e disponibilidade.
 
-## Pré-requisitos
+Sequência completa: iniciar o Integrated Extract em um ponto coordenado → manter mudanças no trail → exportar e importar a linha de base no SCN consistente → entregar o trail ao destino, quando necessário → iniciar o Replicat após a carga inicial. O Distribution Path é necessário quando há Deployments separados.
+
+## 1. Pré-requisitos
 
 - Versões e níveis de patch dos bancos; confirme a compatibilidade com a versão do Deployment.
 - Topologia de cada banco: non-CDB, CDB/PDB ou RAC.
@@ -38,11 +48,17 @@ O **Extract deve capturar as mudanças enquanto a linha de base é carregada**. 
 - Wallets para conexões que exigem TCPS/TLS.
 - Schemas, tabelas, chaves primárias/únicas, tipos de dados e estratégia de carga inicial definidos.
 
-## 1. Configurar IAM, rede e Vault
+Para RAC, prefira o SCAN FQDN ao IP de um nó e verifique as restrições da versão escolhida, especialmente para SCAN com TCPS/TLS.
 
-### IAM
+## 2. IAM
 
-O artigo usa o grupo padrão `Administrators` e apresenta estas policies de serviço como referência:
+O artigo usa o grupo padrão `Administrators`, sem prefixo do Identity Domain, e apresenta esta policy administrativa como referência:
+
+```text
+allow group Administrators to manage all-resources in tenancy
+```
+
+Essa policy é ampla. Restrinja os privilégios e o escopo quando o modelo de acesso da organização exigir. O serviço GoldenGate também precisa das policies a seguir para trabalhar com Vault, chaves e IAM Identity Domains:
 
 ```text
 allow service goldengate to use keys in tenancy
@@ -50,21 +66,27 @@ allow service goldengate to use vaults in tenancy
 allow service goldengate to {idcs_user_viewer, domain_resources_viewer} in tenancy
 ```
 
-Para permitir a leitura de senhas e wallets armazenadas como secrets, crie um dynamic group para os Deployments do compartment:
+Para permitir a leitura de senhas e wallets armazenadas como secrets, acesse **Identity & Security → Dynamic Groups → Create Dynamic Group** e crie, por exemplo, `dg-ogg-deployments`. Use esta regra para os Deployments do compartment:
 
 ```text
 ALL {resource.type = 'goldengatedeployment', resource.compartment.id = '<compartment-ocid>'}
 ```
 
-Depois, conceda acesso aos bundles de secrets:
+Depois, conceda acesso aos bundles de secrets. O artigo usa o escopo da tenancy:
+
+```text
+allow dynamic-group dg-ogg-deployments to read secret-bundles in tenancy
+```
+
+Quando possível, restrinja a policy ao compartment que contém os secrets:
 
 ```text
 allow dynamic-group dg-ogg-deployments to read secret-bundles in compartment <compartment-name>
 ```
 
-> Ajuste o escopo e os nomes das policies ao modelo de IAM da organização. A policy administrativa `manage all-resources in tenancy` mostrada no artigo é ampla; use-a somente se esse nível de acesso já fizer parte do desenho aprovado para o ambiente.
+Adapte os nomes e o escopo das policies à tenancy e ao Identity Domain utilizados.
 
-### Rede
+## 3. Rede
 
 Reserve uma subnet privada para o GoldenGate, por exemplo `10.0.10.0/24` em uma VCN `10.0.0.0/16`, sem sobreposição de CIDRs. Libere o tráfego necessário nos NSGs ou Security Lists:
 
@@ -73,24 +95,26 @@ Reserve uma subnet privada para o GoldenGate, por exemplo `10.0.10.0/24` em uma 
 | Shared endpoint | *Ingress IPs* do Deployment |
 | Dedicated endpoint | *Ingress IPs* exibidos na connection |
 
-### Vault e secrets
+Se os bancos estiverem on-premises ou em outra VCN, valide DRG/LPG, VPN/FastConnect, DNS e rotas de retorno.
 
-Crie um Vault, uma chave AES e secrets separados para cada finalidade:
+## 4. OCI Vault e secrets
 
-| Exemplo de secret | Conteúdo |
-| --- | --- |
-| `OGG-SRC-PASSWORD` | Senha do usuário GoldenGate na origem |
-| `OGG-TGT-PASSWORD` | Senha do usuário GoldenGate no destino |
-| `OGG-SRC-WALLET` | Wallet da origem, quando necessária |
-| `OGG-TGT-WALLET` | Wallet do destino, quando necessária |
+1. Acesse **Identity & Security → Vault → Create Vault**. Crie, por exemplo, `VAULT-OGG`, e aguarde o estado `Active`.
+2. Abra o Vault e acesse **Master Encryption Keys → Create Key**. Crie uma chave AES, por exemplo `KEY-OGG-SECRETS`.
+3. Crie secrets separados para cada finalidade:
+
+   | Exemplo de secret | Conteúdo |
+   | --- | --- |
+   | `OGG-SRC-PASSWORD` | Senha do usuário GoldenGate na origem |
+   | `OGG-TGT-PASSWORD` | Senha do usuário GoldenGate no destino |
+   | `OGG-SRC-WALLET` | Wallet da origem, quando necessária |
+   | `OGG-TGT-WALLET` | Wallet do destino, quando necessária |
 
 No fluxo da connection, use **Create wallet secret** para enviar a wallet. O artigo indica `cwallet.sso` e `tnsnames.ora` como conteúdo mínimo. Não reutilize um secret de senha como secret de wallet.
 
-## 2. Preparar os bancos Oracle
+## 5. Preparar o Oracle Database origem
 
-Execute os comandos com uma conta DBA e adapte-os ao tipo e à versão do banco. Em CDB/PDB, defina o container correto e se o usuário será comum, como `C##GGADMIN`.
-
-### Origem
+Execute os comandos com uma conta DBA, após validá-los no processo de mudança da organização. Em CDB/PDB, defina o container correto e se o usuário será comum, como `C##GGADMIN`.
 
 Verifique `ARCHIVELOG` e prepare o banco para captura:
 
@@ -118,7 +142,9 @@ END;
 /
 ```
 
-### Destino
+Habilite `TRANDATA` para os schemas ou tabelas incluídos na replicação quando configurar o Extract.
+
+## 6. Preparar o Oracle Database destino
 
 Crie o usuário de aplicação das mudanças:
 
@@ -136,14 +162,28 @@ END;
 /
 ```
 
-Confirme a compatibilidade dos objetos e das chaves entre origem e destino antes de iniciar o Replicat.
+Confirme a compatibilidade dos schemas, tabelas, tipos de dados e chaves primárias/únicas entre origem e destino antes de iniciar o Replicat. Em CDB/PDB, ajuste usuário, privilégios e container conforme o desenho do ambiente.
 
-## 3. Criar o Deployment e as connections
+## 7. Criar o Deployment
 
 1. Na OCI Console, acesse **Oracle AI Database → GoldenGate → Deployments → Create deployment**.
-2. Escolha **Data replication**, tecnologia **Oracle Database**, versão compatível com ambos os bancos e a subnet privada preparada.
-3. Aguarde o estado `Active`. Registre a URL da console, os *Ingress IPs* e o endereço privado do Deployment.
-4. Em **GoldenGate → Connections → Create connection**, crie uma connection para cada banco:
+2. Preencha os campos:
+
+   | Campo | Valor |
+   | --- | --- |
+   | Deployment type | `Data replication` |
+   | Technology | `Oracle Database` |
+   | Version | Compatível com origem e destino |
+   | Private subnet | `<subnet-golden-gate>` |
+   | Credential store | OCI IAM ou GoldenGate |
+
+3. Aguarde o estado `Active`. Registre a **Console URL**, os **Ingress IPs** e o endereço privado do Deployment.
+
+Por padrão, o acesso à console é HTTPS na porta `443`. Habilite acesso público somente quando necessário e com regras de rede restritas.
+
+## 8. Criar connections
+
+Em **GoldenGate → Connections → Create connection**, crie uma connection para cada banco:
 
 | Campo | Origem | Destino |
 | --- | --- | --- |
@@ -153,24 +193,45 @@ Confirme a compatibilidade dos objetos e das chaves entre origem e destino antes
 | Usuário | `GGADMIN` | `GGADMIN` |
 | Password secret | `OGG-SRC-PASSWORD` | `OGG-TGT-PASSWORD` |
 | Wallet secret, se necessário | `OGG-SRC-WALLET` | `OGG-TGT-WALLET` |
+| Network connectivity | Shared endpoint ou Dedicated endpoint | Shared endpoint ou Dedicated endpoint |
 
-5. Em **Deployment → Assigned connections**, atribua as duas connections e execute **Test connection** em cada uma. Verifique tanto a conectividade de rede quanto a autenticação no Oracle.
+Crie e altere connections pela **OCI Console**, para manter as configurações sincronizadas com o Deployment. Evite editar credenciais diretamente na console interna do Deployment.
 
-Crie e altere connections pela **OCI Console**, para manter as configurações sincronizadas com o Deployment. Restrinja o acesso público à console do GoldenGate quando ele for necessário.
+## 9. Atribuir e testar connections
 
-## 4. Configurar Extract e Replicat
+1. Abra **GoldenGate → Deployments → `<deployment>` → Assigned connections**.
+2. Clique em **Assign connection** e atribua as connections de origem e de destino.
+3. No menu de ações de cada connection, selecione **Test connection**.
+4. Confirme os dois resultados: **Network-level connectivity** (host e porta alcançáveis) e **Application-level connectivity** (credenciais e conexão Oracle válidas).
 
-Abra **Launch console** no Deployment e siga a sequência:
+## 10. Configurar a replicação
 
-1. Crie um **Integrated Extract** associado à connection de origem.
-2. Defina o ponto de início da captura, habilite `TRANDATA` nos objetos necessários e configure o trail local.
-3. Se usar Deployments separados, configure o **Distribution Path** para entregar o trail ao destino.
-4. Crie o **Replicat**, selecione a connection de destino, o trail correspondente e os mapeamentos de schemas/tabelas.
-5. Inicie o Replicat **após** terminar a carga inicial coordenada com o ponto de captura.
+Abra **Launch console** no Deployment. A ordem geral é **Extract → trail/Distribution Path → Replicat**:
 
-## 5. Coordenar a carga inicial com SCN
+### Origem
+
+1. Crie um **Integrated Extract**.
+2. Selecione a connection de origem.
+3. Defina o ponto inicial da captura: hora atual, SCN específico ou um ponto planejado para a carga inicial.
+4. Habilite `TRANDATA` nos schemas/tabelas necessários.
+5. Configure o trail local.
+6. Se o destino estiver em outro Deployment, crie um **Distribution Path** para entregar o trail.
+
+### Destino
+
+1. Crie um **Replicat**.
+2. Selecione a connection de destino.
+3. Selecione o trail local ou recebido, conforme a topologia.
+4. Defina o mapeamento de schemas e tabelas.
+5. Inicie o Replicat **somente após** concluir a carga inicial, no ponto de aplicação alinhado ao SCN da linha de base.
+
+As opções da interface variam entre versões do GoldenGate. Para Deployments separados, configure também o acesso do Deployment de origem ao Receiver Service do destino.
+
+## 11. Carga inicial
 
 O artigo propõe Data Pump como uma das estratégias de carga inicial. Também são possíveis Extract de carga inicial, ferramenta externa ou início em SCN definido quando os dados já estão sincronizados.
+
+Não inicie a aplicação contínua sem definir como a linha de base e o ponto de início da captura serão coordenados.
 
 Para a estratégia com Data Pump:
 
@@ -187,11 +248,12 @@ Para a estratégia com Data Pump:
    FLASHBACK_SCN=<scn-da-origem>
    ```
 
-4. Importe os dados no destino, confirme a conclusão da carga e só então inicie o Replicat no ponto de aplicação alinhado ao SCN.
+4. Importe os dados no destino e confirme a conclusão da carga.
+5. Alinhe o ponto de aplicação do Replicat ao SCN da linha de base e só então inicie o processo.
 
-> **Ponto crítico:** planeje em conjunto o SCN do Export, o início do Extract e o posicionamento do Replicat. Uma divergência pode causar lacunas ou reaplicação de mudanças.
+> **Ponto crítico:** `FLASHBACK_SCN` é usado no **Export** (`expdp`) desta estratégia. Planeje em conjunto o SCN do Export, o início do Extract e o posicionamento do Replicat. Uma divergência pode causar lacunas ou reaplicação de mudanças. Garanta também retenção de redo/archived logs e espaço para o trail durante a carga.
 
-## 6. Validar e monitorar
+## 12. Operação e validação
 
 No Admin Client, consulte os processos e as mensagens:
 
@@ -200,11 +262,36 @@ INFO ALL
 VIEW MESSAGES
 ```
 
-Confira se Extract e Replicat estão em `RUNNING`, se o lag atende ao SLA e se não há erros. Faça um teste controlado de `INSERT`, `UPDATE` e `DELETE` na origem e confirme cada alteração no destino.
+Confira:
+
+| Item | Resultado esperado |
+| --- | --- |
+| Extract | `RUNNING` |
+| Replicat | `RUNNING` |
+| Lag | Dentro do SLA definido |
+| Mensagens | Sem erros pendentes em `VIEW MESSAGES` |
+| Dados | Alterações refletidas no destino |
+
+Faça um teste controlado de `INSERT`, `UPDATE` e `DELETE` na origem e confirme cada alteração no destino. Verifique também se a linha de base e as mudanças posteriores ao SCN não geraram lacunas nem duplicidade.
+
+## Solução de problemas
+
+| Sintoma | Verificações iniciais |
+| --- | --- |
+| Connection falha no teste de rede | Host/SCAN, porta, DNS, rotas, NSG/Security List e *Ingress IPs* do endpoint escolhido |
+| Connection falha no teste de aplicação | Service name, usuário, password secret, wallet/TCPS e privilégios no banco |
+| Deployment não lê secrets | Regra do dynamic group, compartment do Deployment e policy `read secret-bundles` no local dos secrets |
+| Extract não captura alterações | `ARCHIVELOG`, logging adicional, parâmetro GoldenGate, `TRANDATA`, privilégios e ponto inicial |
+| Replicat apresenta erros ou dados divergentes | Importação inicial, SCN, trail, mapeamento, compatibilidade dos objetos e mensagens do processo |
+| Lag acima do SLA | Volume de alterações, entrega do trail, rede, capacidade dos Deployments e desempenho do destino |
+
+Use as mensagens e os relatórios dos processos para identificar a causa antes de reiniciar ou reposicionar Extract/Replicat.
 
 ## Referências
 
 - [Artigo original — Cristiano Costa](https://medium.com/@costa.cristiano/oci-goldengate-oracle-database-para-oracle-database-249184cd4ed1)
 - [OCI GoldenGate: recursos de replicação de dados](https://docs.oracle.com/en/cloud/paas/goldengate-service/ocigg/create-data-replication-resources.html)
+- [OCI GoldenGate: policies](https://docs.oracle.com/en/cloud/paas/goldengate-service/ocigg/oracle-cloud-infrastructure-goldengate-policies.html)
 - [OCI GoldenGate: atribuir e testar connections](https://docs.oracle.com/en/cloud/paas/goldengate-service/ocigg/manage-deployments.html)
+- [OCI GoldenGate: Distribution Path](https://docs.oracle.com/en/cloud/paas/goldengate-service/ocigg/replicate/add-a-distribution-path.html)
 - [Oracle Data Pump Export: parâmetro `FLASHBACK_SCN`](https://docs.oracle.com/en/database/oracle/oracle-database/19/sutil/oracle-data-pump-export-utility.html)
