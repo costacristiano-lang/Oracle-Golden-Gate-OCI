@@ -2,8 +2,6 @@
 
 Guia de referência para configurar **replicação contínua Oracle → Oracle** com o OCI GoldenGate Data Replication. Ele cobre a preparação dos bancos, IAM, rede, Vault, conexões, carga inicial e validação.
 
-> **Origem:** adaptação para GitHub do artigo [OCI GoldenGate: Oracle Database para Oracle Database](https://medium.com/@costa.cristiano/oci-goldengate-oracle-database-para-oracle-database-249184cd4ed1), de Cristiano Costa. Substitua os valores entre `<...>` pelos dados do seu ambiente e valide os comandos antes de executá-los em produção.
-
 ## Sumário
 
 - [Arquitetura e sequência](#arquitetura-e-sequência)
