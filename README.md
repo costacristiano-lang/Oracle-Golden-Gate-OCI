@@ -217,6 +217,44 @@ Abra **Launch console** no Deployment. A ordem geral é **Extract → trail/Dist
 5. Configure o trail local.
 6. Se o destino estiver em outro Deployment, crie um **Distribution Path** para entregar o trail.
 
+#### Consultas auxiliares para o mapeamento da origem
+
+Execute as consultas abaixo na origem, no container/PDB que contém os schemas a replicar. Elas listam schemas não mantidos pela Oracle que possuem objetos e excluem `GGADMIN`. Revise o resultado antes de usar os comandos gerados.
+
+**Gerar comandos para adicionar `SCHEMATRANDATA` com `ALLCOLS`:**
+
+```sql
+SET PAGESIZE 1000 LINESIZE 1000
+
+SELECT DISTINCT 'ADD SCHEMATRANDATA ' || owner || ' ALLCOLS' AS comando
+FROM dba_objects
+WHERE owner <> 'GGADMIN'
+  AND owner IN (
+    SELECT username
+    FROM dba_users
+    WHERE oracle_maintained = 'N'
+  )
+ORDER BY comando;
+```
+
+**Gerar linhas `TABLE` para os parâmetros do Extract:**
+
+```sql
+SET PAGESIZE 1000 LINESIZE 1000
+
+SELECT DISTINCT 'TABLE ' || owner || '.*;' AS parametro_extract
+FROM dba_objects
+WHERE owner <> 'GGADMIN'
+  AND owner IN (
+    SELECT username
+    FROM dba_users
+    WHERE oracle_maintained = 'N'
+  )
+ORDER BY parametro_extract;
+```
+
+O resultado da primeira consulta deve ser executado no Admin Client do GoldenGate após `DBLOGIN`. As linhas da segunda consulta entram no arquivo de parâmetros do Extract. `ALLCOLS` amplia o logging suplementar; confirme quais schemas devem participar da replicação antes de aplicar os comandos.
+
 ### Destino
 
 1. Crie um **Replicat**.
@@ -294,4 +332,5 @@ Use as mensagens e os relatórios dos processos para identificar a causa antes d
 - [OCI GoldenGate: policies](https://docs.oracle.com/en/cloud/paas/goldengate-service/ocigg/oracle-cloud-infrastructure-goldengate-policies.html)
 - [OCI GoldenGate: atribuir e testar connections](https://docs.oracle.com/en/cloud/paas/goldengate-service/ocigg/manage-deployments.html)
 - [OCI GoldenGate: Distribution Path](https://docs.oracle.com/en/cloud/paas/goldengate-service/ocigg/replicate/add-a-distribution-path.html)
+- [Oracle GoldenGate: `ADD SCHEMATRANDATA`](https://docs.oracle.com/en/database/goldengate/core/26/gclir/add-schematrandata.html)
 - [Oracle Data Pump Export: parâmetro `FLASHBACK_SCN`](https://docs.oracle.com/en/database/oracle/oracle-database/19/sutil/oracle-data-pump-export-utility.html)
