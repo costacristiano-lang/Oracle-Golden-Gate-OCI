@@ -255,6 +255,53 @@ ORDER BY parametro_extract;
 
 O resultado da primeira consulta deve ser executado no Admin Client do GoldenGate após `DBLOGIN`. As linhas da segunda consulta entram no arquivo de parâmetros do Extract. `ALLCOLS` amplia o logging suplementar; confirme quais schemas devem participar da replicação antes de aplicar os comandos.
 
+#### Opção de parâmetros para o Integrated Extract
+
+Exemplo para capturar DML e DDL dos schemas selecionados. Substitua os nomes do Extract, do alias, do trail e dos schemas pelos valores do ambiente:
+
+```text
+EXTRACT EAPP01
+USERIDALIAS conn-orclsrc
+EXTTRAIL ea
+
+REPORTCOUNT EVERY 10 MINUTES, RATE
+REPORT AT 09:00
+
+DDL INCLUDE MAPPED
+DDLOPTIONS REPORT
+
+LOGALLSUPCOLS
+TABLE XXX.*;
+TABLE XX11.*;
+```
+
+| Parâmetro | O que faz |
+| --- | --- |
+| `REPORTCOUNT EVERY 10 MINUTES, RATE` | Registra a quantidade de operações processadas a cada 10 minutos e as taxas total e desde o último relatório. Pode não emitir uma linha exatamente no intervalo se não houver registros processados. |
+| `REPORT AT 09:00` | Acrescenta estatísticas de execução ao relatório do processo diariamente às 09:00; não substitui nem apaga o relatório. Confirme o fuso horário usado pelo Deployment. |
+| `DDL INCLUDE MAPPED` | Captura as DDLs suportadas para objetos no escopo mapeado pelas linhas `TABLE`. A aplicação da DDL no destino também depende da configuração do Replicat. |
+| `DDLOPTIONS REPORT` | Acrescenta ao relatório detalhes das etapas de processamento de DDL, úteis para diagnóstico. |
+| `LOGALLSUPCOLS` | Inclui no trail as imagens anteriores das colunas com logging suplementar necessárias, por exemplo para dependências do Integrated/Parallel Replicat. O parâmetro é o padrão nas versões atuais, mas pode ser declarado explicitamente. Não cria o `TRANDATA`; configure-o antes. |
+| `TABLE XXX.*;` e `TABLE XX11.*;` | Selecionam todas as tabelas desses dois schemas para captura. Troque `XXX` e `XX11` pelos schemas reais e confira que eles têm `SCHEMATRANDATA`. |
+
+**Fuso da origem, somente se necessário:** para Integrated Extract em Oracle, se o sistema operacional do banco de origem e o processo Extract usam fusos diferentes, acrescente a linha abaixo ao arquivo de parâmetros. O valor deve corresponder ao fuso do **sistema operacional da origem**, não ser deduzido apenas de `DBTIMEZONE` ou `SESSIONTIMEZONE`:
+
+```text
+TRANLOGOPTIONS SOURCE_OS_TIMEZONE GMT-03:00
+```
+
+**Alternativa para `TRUNCATE TABLE` sem captura completa de DDL:** use `GETTRUNCATES` antes das linhas `TABLE` se quiser capturar truncamentos de forma independente, sem `DDL INCLUDE MAPPED` para essas mesmas tabelas. O efeito continua para as linhas `TABLE` seguintes. Configure o Replicat para processar truncamentos conforme a topologia.
+
+```text
+GETTRUNCATES
+TABLE XXX.*;
+TABLE XX11.*;
+```
+
+Não habilite `GETTRUNCATES` junto com a captura de DDL que já inclui `TRUNCATE` para as mesmas tabelas: a Oracle documenta o erro `OGG-00506` e recomenda escolher apenas um mecanismo. O suporte autônomo de `GETTRUNCATES` também tem limitações para tabelas/partições vazias; valide esse caso antes de usá-lo.
+
+Referências dos parâmetros: [REPORTCOUNT](https://docs.oracle.com/en/database/goldengate/core/26/reference/reportcount.html), [REPORT](https://docs.oracle.com/en/database/goldengate/core/26/reference/report.html), [DDL](https://docs.oracle.com/en/database/goldengate/core/26/reference/ddl.html), [DDLOPTIONS](https://docs.oracle.com/en/database/goldengate/core/26/reference/ddloptions.html), [LOGALLSUPCOLS](https://docs.oracle.com/en/database/goldengate/core/26/reference/logallsupcols.html), [GETTRUNCATES e DDL](https://docs.oracle.com/en/database/goldengate/core/26/coredoc/extract-oracle-truncates.html) e [SOURCE_OS_TIMEZONE](https://docs.oracle.com/en/database/goldengate/core/26/reference/tranlogoptions.html).
+
 ### Destino
 
 1. Crie um **Replicat**.
