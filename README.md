@@ -26,12 +26,26 @@ Passo a passo para configurar **replicação contínua Oracle → Oracle** com o
 
 ```mermaid
 flowchart LR
-    A[(Oracle origem)] -->|Integrated Extract| B[Trail local]
-    B -->|Distribution Path, se houver Deployments separados| C[Trail no destino]
-    B -->|Deployment único| D[Replicat]
-    C --> D
-    D --> E[(Oracle destino)]
-    A -. "Data Pump: export consistente no SCN" .-> E
+    SRC[("Oracle origem")]
+    TGT[("Oracle destino")]
+    subgraph INITIAL["Carga inicial"]
+        EXP["Data Pump Export<br/>SCN consistente"]
+        IMP["Data Pump Import"]
+        EXP --> IMP
+    end
+    subgraph CDC["Sincronização contínua"]
+        EX["Integrated Extract<br/>ponto coordenado com a carga"]
+        TL["Trail local"]
+        DP["Distribution Path<br/>Deployments separados"]
+        TR["Trail no destino"]
+        REP["Replicat<br/>após a carga inicial"]
+        EX --> TL --> DP --> TR --> REP
+        TL -->|"Deployment único"| REP
+    end
+    SRC --> EXP
+    IMP --> TGT
+    SRC --> EX
+    REP --> TGT
 ```
 
 O **Extract deve capturar as mudanças enquanto a linha de base é carregada**. Após a importação, o Replicat aplica as mudanças acumuladas e passa a acompanhar a origem. Um Deployment pode atender aos dois bancos em um cenário simples; avalie Deployments separados conforme volume, isolamento e disponibilidade.
