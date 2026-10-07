@@ -312,6 +312,48 @@ Referências dos parâmetros: [REPORTCOUNT](https://docs.oracle.com/en/database/
 
 As opções da interface variam entre versões do GoldenGate. Para Deployments separados, configure também o acesso do Deployment de origem ao Receiver Service do destino.
 
+#### Opção de parâmetros para o Replicat
+
+Exemplo para aplicar DML e truncamentos capturados pela alternativa `GETTRUNCATES` do Extract. Ajuste o nome do Replicat e o alias de destino; habilite a filtragem de instanciação somente após validar os CSNs por tabela da carga inicial.
+
+```text
+REPLICAT RAPP01
+USERIDALIAS conn-orcltgt
+
+-- Opcional: somente com estruturas idênticas e trail sem definições
+-- ASSUMETARGETDEFS
+
+GETTRUNCATES
+DBOPTIONS ENABLE_INSTANTIATION_FILTERING
+REPERROR (DEFAULT, ABEND)
+
+-- Opcional: excluir apenas os objetos definidos no escopo da replicação
+-- MAPEXCLUDE XXX.TABELA_EXCLUIDA;
+
+MAP XXX.*, TARGET XXX.*;
+MAP XX11.*, TARGET XX11.*;
+```
+
+| Parâmetro | O que faz |
+| --- | --- |
+| `ASSUMETARGETDEFS` | Assume que as estruturas de colunas da origem e do destino são idênticas e usa as definições do destino. É uma opção para trails antigos sem metadados de tabelas. Em trails com definições, os metadados do trail prevalecem e esse parâmetro normalmente é ignorado (`OGG-02760`). Não acrescente `OVERRIDE` sem avaliar as estruturas. |
+| `GETTRUNCATES` | Aplica no destino as operações de truncamento recebidas no trail. Deve preceder os `MAP` aos quais se aplica; depende de o Extract capturar esses truncamentos. |
+| `DBOPTIONS ENABLE_INSTANTIATION_FILTERING` | Habilita a filtragem por CSN de instanciação de cada tabela no Oracle destino, evitando reaplicar alterações já incluídas na carga inicial. Exige CSNs corretos registrados no destino; o parâmetro sozinho não cria esses pontos de corte. |
+| `REPERROR (DEFAULT, ABEND)` | Define que erros de aplicação sem uma regra específica provocam rollback da transação afetada e encerramento anormal do Replicat. Corrija a causa antes de reiniciar. |
+| `TABLEEXCLUDE XXX.*;` | É um parâmetro do **Extract**: exclui todas as tabelas desse schema da captura. No Replicat, use `MAPEXCLUDE` para expressar exclusões de objetos da origem. |
+| `MAPEXCLUDE XXX.TABELA_EXCLUIDA;` | Exclui a tabela indicada da aplicação, mesmo que ela corresponda a um `MAP` com curinga. O exemplo está comentado para ser ativado somente quando houver uma exclusão planejada. |
+| `MAP XXX.*, TARGET XXX.*;` | Mapeia as tabelas capturadas do schema `XXX` para tabelas de mesmo nome no schema `XXX` do destino. Repita o mapeamento para cada schema incluído no Extract, como `XX11`. |
+
+**Correspondência com o Extract:** os objetos à esquerda de `MAP` devem corresponder aos incluídos nas linhas `TABLE` do Extract. Neste procedimento, preservando os nomes dos schemas e tabelas, `TARGET` usa os mesmos nomes. Se o destino tiver outro schema, ajuste o lado `TARGET`, por exemplo `MAP XXX.*, TARGET NOVO_SCHEMA.*;`. Em CDB/PDB, ajuste também a qualificação do container da origem quando o trail usar nomes em três partes.
+
+As exclusões devem seguir o mesmo escopo planejado na origem: `TABLEEXCLUDE` no Extract corresponde a `MAPEXCLUDE` no Replicat. Objetos excluídos da captura não chegam ao trail. **Não copie `XXX.*` como exclusão se deseja replicar esse schema:** `MAPEXCLUDE XXX.*;` elimina todas as tabelas de `MAP XXX.*, TARGET XXX.*;`.
+
+**Validação da instanciação:** confirme que o Data Pump registrou os CSNs no destino após preparar as tabelas na origem com `TRANDATA/SCHEMATRANDATA PREPARECSN`, ou registre o CSN de cada tabela com `SET INSTANTIATION CSN` no Admin Client após `DBLOGIN`. Os valores precisam representar a carga inicial efetivamente importada. Confira os metadados em `DBA_APPLY_INSTANTIATED_OBJECTS` e as mensagens de instanciação no relatório do Replicat. Isso deve ser coordenado com o ponto de início do Replicat descrito na carga inicial.
+
+**Se usar a opção de captura de DDL do Extract:** configure também a aplicação de DDL no Replicat, por exemplo `DDL INCLUDE MAPPED` e `DDLOPTIONS REPORT`, conforme o escopo escolhido. `GETTRUNCATES` não habilita a aplicação geral de DDL; use o mecanismo de truncamento correspondente à configuração da origem.
+
+Referências: [ASSUMETARGETDEFS](https://docs.oracle.com/en/database/goldengate/core/26/reference/assumetargetdefs.html), [GETTRUNCATES](https://docs.oracle.com/en/database/goldengate/core/26/reference/gettruncates-ignoretruncates.html), [DBOPTIONS](https://docs.oracle.com/en/database/goldengate/core/26/reference/dboptions.html), [SET INSTANTIATION CSN](https://docs.oracle.com/en/database/goldengate/core/26/gclir/set-instantiation-csn.html), [REPERROR](https://docs.oracle.com/en/database/goldengate/core/26/reference/reperror.html), [TABLEEXCLUDE](https://docs.oracle.com/en/database/goldengate/core/26/reference/tableexclude.html) e [MAPEXCLUDE](https://docs.oracle.com/en/database/goldengate/core/26/reference/mapexclude.html).
+
 ## 11. Carga inicial
 
 O artigo propõe Data Pump como uma das estratégias de carga inicial. Também são possíveis Extract de carga inicial, ferramenta externa ou início em SCN definido quando os dados já estão sincronizados.
